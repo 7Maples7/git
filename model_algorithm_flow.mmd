@@ -1,0 +1,39 @@
+flowchart TD
+    A["数据源: SQLite / NPZ"] --> B["加载样本: load_records"]
+    B --> C["RadarSample\nmtd_echo / pc_echo / waveform / label"]
+    C --> D["按 dim reshape\nraw -> [points, channels]"]
+
+    D --> E1["MTD 时域幅度\nch>=2: sqrt(I^2+Q^2)\nch<2: abs(x)"]
+    D --> E2["PC 时域幅度\nch>=2: sqrt(I^2+Q^2)\nch<2: abs(x)"]
+    D --> E3["PC 复数频谱\nabs(fftshift(fft(I+jQ)))"]
+    C --> E4["Meta 9 维特征\nrange / pw / prt / prt_nbr / duty\nTBP / MTD能量 / PC频谱dB均值 / PC长度"]
+
+    E1 --> F1["standardize_profile\nlog1p(abs(x)) -> z-score"]
+    E2 --> F2["standardize_profile\nlog1p(abs(x)) -> z-score"]
+    E3 --> F3["standardize_profile\nlog1p(abs(x)) -> z-score"]
+    E4 --> F4["meta 向量\n[B, 9]"]
+
+    F1 --> G["collate_radar_batch\npadding + mask"]
+    F2 --> G
+    F3 --> G
+    F4 --> G
+
+    G --> H1["mtd_echo + mtd_mask\n[B, max_mtd_len]"]
+    G --> H2["pc_echo + pc_mask\n[B, max_pc_len]"]
+    G --> H3["pc_spectrum + pc_spectrum_mask\n[B, max_pc_spectrum_len]"]
+    G --> H4["meta\n[B, 9]"]
+    G --> H5["label\n[B]"]
+
+    H1 --> I1["MTD CNN 分支\nConv1d -> GN -> SiLU\nConv1d stride2 -> GN -> SiLU\nConv1d stride2 -> GN -> SiLU\nAvgPool + MaxPool"]
+    H2 --> I2["PC 时域 CNN 分支\n同结构\n输出 256 维"]
+    H3 --> I3["PC 频谱 CNN 分支\n同结构\n输出 256 维"]
+    H4 --> I4["Meta MLP\nLinear -> LN -> SiLU -> Dropout\nLinear -> SiLU\n输出 64 维"]
+
+    I1 --> J["特征拼接\n256 + 256 + 256 + 64 = 832"]
+    I2 --> J
+    I3 --> J
+    I4 --> J
+
+    J --> K["分类头\nLinear 832->256\nLayerNorm + SiLU + Dropout\nLinear 256->num_classes"]
+    K --> L["输出 logits\n[B, 3]"]
+    L --> M["训练: CrossEntropyLoss\n推理: softmax + argmax"]

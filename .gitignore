@@ -1,0 +1,17 @@
+.idea/
+__pycache__/
+*.py[cod]
+*$py.class
+
+runs/
+*.pt
+*.pth
+*.onnx
+
+.venv/
+venv/
+env/
+
+.env
+.DS_Store
+Thumbs.db
