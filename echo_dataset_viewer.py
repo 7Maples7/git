@@ -89,6 +89,49 @@ def _display_label(label: Any) -> str:
     return format_target_type(canonical_label(label), show_code=True)
 
 
+def _format_distance_edge(value: float) -> str:
+    if abs(value - round(value)) < 1.0e-6:
+        return str(int(round(value)))
+    return f"{value:.1f}"
+
+
+def _format_range_bin(start: float, width: float) -> str:
+    end = start + width
+    return f"{_format_distance_edge(start)}-{_format_distance_edge(end)}"
+
+
+def _range_distribution(
+    records: list[RadarSample],
+    bin_width_m: float,
+) -> tuple[list[str], list[tuple[float, str, int, dict[str, int]]], int, tuple[float, float] | None]:
+    valid: list[tuple[float, str]] = []
+    for rec in records:
+        distance = float(rec.range_m)
+        if not np.isfinite(distance):
+            continue
+        valid.append((distance, _display_label(rec.label)))
+
+    if not valid:
+        return [], [], 0, None
+
+    label_counts = Counter(label for _, label in valid)
+    labels = [label for label, _count in label_counts.most_common()]
+    bins: dict[int, Counter[str]] = {}
+    for distance, label in valid:
+        bin_index = int(np.floor(distance / bin_width_m))
+        bins.setdefault(bin_index, Counter())[label] += 1
+
+    rows: list[tuple[float, str, int, dict[str, int]]] = []
+    for bin_index in sorted(bins):
+        start = float(bin_index) * bin_width_m
+        counts = dict(bins[bin_index])
+        total = int(sum(counts.values()))
+        rows.append((start, _format_range_bin(start, bin_width_m), total, counts))
+
+    distances = [distance for distance, _label in valid]
+    return labels, rows, len(valid), (float(min(distances)), float(max(distances)))
+
+
 def _reshape_echo(raw: Any, row: int, col: int, ch: int) -> tuple[np.ndarray, str]:
     arr = np.asarray(raw, dtype=np.float32).reshape(-1)
     row = max(0, int(row))
@@ -203,6 +246,8 @@ class EchoDatasetViewer(tk.Tk):
         self.status_var = tk.StringVar(value="请选择数据集目录、split 目录或 .db/.sqlite/.npz 文件")
         self.index_var = tk.StringVar(value="1")
         self.summary_var = tk.StringVar(value="未加载")
+        self.range_bin_width_var = tk.StringVar(value="100")
+        self.range_stats_var = tk.StringVar(value="未加载")
         self.no_label_var = tk.BooleanVar(value=False)
 
         self.train_data_var = tk.StringVar(value="")
@@ -540,6 +585,31 @@ class EchoDatasetViewer(tk.Tk):
         summary_frame.pack(side=tk.TOP, fill=tk.X)
         ttk.Label(summary_frame, textvariable=self.summary_var, justify=tk.LEFT).pack(anchor=tk.W)
 
+        range_frame = ttk.LabelFrame(left, text="距离分布统计", padding=8)
+        range_frame.pack(side=tk.TOP, fill=tk.BOTH, pady=(8, 0))
+        range_controls = ttk.Frame(range_frame, style="Panel.TFrame")
+        range_controls.pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(range_controls, text="距离段(m)").pack(side=tk.LEFT)
+        ttk.Entry(range_controls, textvariable=self.range_bin_width_var, width=8).pack(side=tk.LEFT, padx=(6, 6))
+        ttk.Button(range_controls, text="统计", command=self.refresh_range_distribution).pack(side=tk.LEFT)
+        ttk.Label(range_frame, textvariable=self.range_stats_var, style="Muted.TLabel", justify=tk.LEFT).pack(
+            side=tk.TOP,
+            fill=tk.X,
+            pady=(6, 4),
+        )
+        range_table = ttk.Frame(range_frame, style="Panel.TFrame")
+        range_table.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.range_tree = ttk.Treeview(range_table, show="headings", height=7)
+        range_scroll_y = ttk.Scrollbar(range_table, orient=tk.VERTICAL, command=self.range_tree.yview)
+        range_scroll_x = ttk.Scrollbar(range_table, orient=tk.HORIZONTAL, command=self.range_tree.xview)
+        self.range_tree.configure(yscrollcommand=range_scroll_y.set, xscrollcommand=range_scroll_x.set)
+        self.range_tree.grid(row=0, column=0, sticky="nsew")
+        range_scroll_y.grid(row=0, column=1, sticky="ns")
+        range_scroll_x.grid(row=1, column=0, sticky="ew")
+        range_table.rowconfigure(0, weight=1)
+        range_table.columnconfigure(0, weight=1)
+        self._clear_range_distribution()
+
         nav = ttk.LabelFrame(left, text="点迹选择", padding=8)
         nav.pack(side=tk.TOP, fill=tk.X, pady=(8, 0))
         ttk.Button(nav, text="上一条", command=lambda: self.move_index(-1)).pack(side=tk.LEFT)
@@ -860,6 +930,7 @@ class EchoDatasetViewer(tk.Tk):
         self.records = []
         self.current_index = -1
         self._clear_tree()
+        self._clear_range_distribution("加载中...")
         self._clear_plot()
         self._set_info("")
 
@@ -880,6 +951,7 @@ class EchoDatasetViewer(tk.Tk):
         self.load_button.configure(state=tk.NORMAL)
         self.status_var.set("加载失败")
         self.summary_var.set("加载失败")
+        self._clear_range_distribution("加载失败")
         messagebox.showerror("加载失败", str(exc))
 
     def _finish_load_success(self, path: str, records: list[RadarSample]) -> None:
@@ -887,6 +959,7 @@ class EchoDatasetViewer(tk.Tk):
         self.records = records
         self.current_index = 0 if records else -1
         self._populate_summary(path)
+        self.refresh_range_distribution(show_errors=False)
         self._populate_tree()
         if records:
             self.show_record(0)
@@ -905,6 +978,69 @@ class EchoDatasetViewer(tk.Tk):
             f"pc_dim: {dict(pc_dims.most_common(5))}",
         ]
         self.summary_var.set("\n".join(lines))
+
+    def _parse_range_bin_width(self) -> float:
+        try:
+            bin_width = float(self.range_bin_width_var.get())
+        except ValueError as exc:
+            raise ValueError("距离段宽度必须是数字。") from exc
+        if not np.isfinite(bin_width) or bin_width <= 0:
+            raise ValueError("距离段宽度必须大于 0。")
+        return float(bin_width)
+
+    def _clear_range_distribution(self, message: str = "未加载") -> None:
+        if not hasattr(self, "range_tree"):
+            return
+        self.range_stats_var.set(message)
+        self.range_tree.configure(columns=("range_bin", "total"))
+        self.range_tree.heading("range_bin", text="距离段(m)")
+        self.range_tree.heading("total", text="总数")
+        self.range_tree.column("range_bin", width=110, minwidth=92, anchor=tk.CENTER, stretch=False)
+        self.range_tree.column("total", width=58, minwidth=52, anchor=tk.CENTER, stretch=False)
+        for iid in self.range_tree.get_children():
+            self.range_tree.delete(iid)
+
+    def refresh_range_distribution(self, show_errors: bool = True) -> None:
+        if not self.records:
+            self._clear_range_distribution("未加载数据")
+            return
+        try:
+            bin_width = self._parse_range_bin_width()
+        except ValueError as exc:
+            self.range_stats_var.set(str(exc))
+            if show_errors:
+                messagebox.showwarning("距离段设置错误", str(exc))
+            return
+
+        labels, rows, valid_count, span = _range_distribution(self.records, bin_width)
+        if span is None:
+            self._clear_range_distribution("没有可统计的有效距离")
+            return
+
+        label_columns = [f"label_{idx}" for idx in range(len(labels))]
+        columns = ("range_bin", "total", *label_columns)
+        self.range_tree.configure(columns=columns)
+        self.range_tree.heading("range_bin", text="距离段(m)")
+        self.range_tree.heading("total", text="总数")
+        self.range_tree.column("range_bin", width=110, minwidth=92, anchor=tk.CENTER, stretch=False)
+        self.range_tree.column("total", width=58, minwidth=52, anchor=tk.CENTER, stretch=False)
+        for col, label in zip(label_columns, labels):
+            self.range_tree.heading(col, text=label)
+            self.range_tree.column(col, width=128, minwidth=96, anchor=tk.CENTER, stretch=False)
+
+        for iid in self.range_tree.get_children():
+            self.range_tree.delete(iid)
+        for row_idx, (_start, bin_label, total, counts) in enumerate(rows):
+            values = [bin_label, total, *(counts.get(label, 0) for label in labels)]
+            self.range_tree.insert("", tk.END, iid=f"range_{row_idx}", values=values)
+
+        skipped = len(self.records) - valid_count
+        suffix = f"；跳过无效距离 {skipped} 条" if skipped else ""
+        min_range, max_range = span
+        self.range_stats_var.set(
+            f"范围 {_format_distance_edge(min_range)}-{_format_distance_edge(max_range)} m；"
+            f"段宽 {_format_distance_edge(bin_width)} m；有效 {valid_count} 条{suffix}"
+        )
 
     def _populate_tree(self) -> None:
         self._clear_tree()
