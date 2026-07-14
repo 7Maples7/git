@@ -259,6 +259,7 @@ class EchoDatasetViewer(tk.Tk):
         self.lr_var = tk.StringVar(value="0.001")
         self.weight_decay_var = tk.StringVar(value="0.0001")
         self.dropout_var = tk.StringVar(value="0.2")
+        self.train_distance_bin_width_var = tk.StringVar(value="100")
         self.device_var = tk.StringVar(value="auto")
         self.class_weight_var = tk.BooleanVar(value=True)
         self.meta_vars = {
@@ -701,14 +702,15 @@ class EchoDatasetViewer(tk.Tk):
         self._entry_row(param_frame, "lr", self.lr_var, 2)
         self._entry_row(param_frame, "weight_decay", self.weight_decay_var, 3)
         self._entry_row(param_frame, "dropout", self.dropout_var, 4)
-        ttk.Label(param_frame, text="device").grid(row=5, column=0, sticky="w", pady=3)
+        self._entry_row(param_frame, "评估距离段(m)", self.train_distance_bin_width_var, 5)
+        ttk.Label(param_frame, text="device").grid(row=6, column=0, sticky="w", pady=3)
         ttk.Combobox(
             param_frame,
             textvariable=self.device_var,
             values=("auto", "cpu", "cuda"),
             state="readonly",
             width=12,
-        ).grid(row=5, column=1, sticky="ew", pady=3)
+        ).grid(row=6, column=1, sticky="ew", pady=3)
         ttk.Checkbutton(
             param_frame,
             text="使用类别权重",
@@ -716,7 +718,7 @@ class EchoDatasetViewer(tk.Tk):
             style="Checkmark.TCheckbutton",
             takefocus=False,
         ).grid(
-            row=6,
+            row=7,
             column=0,
             columnspan=2,
             sticky="w",
@@ -1363,6 +1365,7 @@ class EchoDatasetViewer(tk.Tk):
                 weight_decay=float(self.weight_decay_var.get()),
                 dropout=float(self.dropout_var.get()),
                 class_weight=bool(self.class_weight_var.get()),
+                distance_bin_width_m=float(self.train_distance_bin_width_var.get()),
                 device=self.device_var.get(),
                 meta_features=",".join(selected_meta),
             )
@@ -1378,7 +1381,8 @@ class EchoDatasetViewer(tk.Tk):
         if cfg.test_data:
             self._append_train_log(f"测试集: {cfg.test_data}\n")
         self._append_train_log(f"输出目录: {cfg.out_dir}\n")
-        self._append_train_log(f"meta_features: {selected_meta}\n\n")
+        self._append_train_log(f"meta_features: {selected_meta}\n")
+        self._append_train_log(f"distance_bin_width_m: {cfg.distance_bin_width_m:g}\n\n")
         self.train_button.configure(state=tk.DISABLED)
         self.status_var.set("训练中...")
 

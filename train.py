@@ -69,6 +69,7 @@ class TrainConfig:
     dropout: float = 0.2
     grad_clip: float = 5.0
     class_weight: bool = True
+    distance_bin_width_m: float = 100.0
     seed: int = 42
     device: str = "auto"
     meta_features: str = ""
@@ -162,6 +163,98 @@ def class_weight_tensor(records: Sequence[RadarSample], label_to_id: dict, devic
     return torch.as_tensor(weights, dtype=torch.float32, device=device)
 
 
+def _format_distance_edge(value: float) -> str:
+    if abs(value - round(value)) < 1.0e-6:
+        return str(int(round(value)))
+    return f"{value:.1f}"
+
+
+def _format_distance_bin(start: float, end: float) -> str:
+    return f"{_format_distance_edge(start)}-{_format_distance_edge(end)}"
+
+
+def distance_binned_metrics(
+    y_true: Sequence[int],
+    y_pred: Sequence[int],
+    ranges_m: Sequence[float],
+    num_classes: int,
+    class_names: Sequence[str],
+    bin_width_m: float,
+) -> dict:
+    """Return classification metrics grouped by fixed-width range bins."""
+    if not np.isfinite(bin_width_m) or bin_width_m <= 0:
+        return {
+            "bin_width_m": float(bin_width_m),
+            "valid_count": 0,
+            "skipped_count": len(y_true),
+            "bins": [],
+        }
+
+    groups: dict[int, dict[str, list]] = {}
+    skipped = max(0, len(y_true) - len(ranges_m))
+    for target, pred, range_m in zip(y_true, y_pred, ranges_m):
+        distance = float(range_m)
+        if not np.isfinite(distance):
+            skipped += 1
+            continue
+        bin_index = int(np.floor(distance / bin_width_m))
+        group = groups.setdefault(bin_index, {"y_true": [], "y_pred": []})
+        group["y_true"].append(int(target))
+        group["y_pred"].append(int(pred))
+
+    bins = []
+    valid_count = 0
+    for bin_index in sorted(groups):
+        group = groups[bin_index]
+        start = float(bin_index) * float(bin_width_m)
+        end = start + float(bin_width_m)
+        sample_count = len(group["y_true"])
+        valid_count += sample_count
+        bins.append(
+            {
+                "range_start_m": start,
+                "range_end_m": end,
+                "range_label": _format_distance_bin(start, end),
+                "sample_count": sample_count,
+                "metrics": classification_metrics(group["y_true"], group["y_pred"], num_classes, class_names),
+            }
+        )
+
+    return {
+        "bin_width_m": float(bin_width_m),
+        "valid_count": int(valid_count),
+        "skipped_count": int(skipped),
+        "bins": bins,
+    }
+
+
+def print_distance_binned_metrics(metrics: dict, split_name: str) -> None:
+    distance_bins = metrics.get("distance_bins")
+    if not distance_bins:
+        print(f"[{split_name} by distance] no distance-bin metrics", flush=True)
+        return
+
+    print(
+        f"[{split_name} by distance] bin_width={_format_distance_edge(float(distance_bins['bin_width_m']))}m "
+        f"valid={distance_bins['valid_count']} skipped={distance_bins['skipped_count']}",
+        flush=True,
+    )
+    if not distance_bins["bins"]:
+        print("  no valid distance bins", flush=True)
+        return
+    for item in distance_bins["bins"]:
+        bin_metrics = item["metrics"]
+        print(
+            f"  {item['range_label']}m | n={item['sample_count']} "
+            f"| acc={bin_metrics['accuracy']:.4f} "
+            f"| macro_p={bin_metrics['macro_precision']:.4f} "
+            f"| macro_r={bin_metrics['macro_recall']:.4f} "
+            f"| macro_f1={bin_metrics['macro_f1']:.4f} "
+            f"| weighted_f1={bin_metrics['weighted_f1']:.4f}",
+            flush=True,
+        )
+
+
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
@@ -169,11 +262,13 @@ def evaluate(
     criterion: nn.Module,
     device: torch.device,
     class_names: Sequence[str],
+    distance_bin_width_m: float = 0.0,
 ) -> dict:
     model.eval()
     total_loss = 0.0
     total_count = 0
     y_true, y_pred = [], []
+    ranges_m: list[float] = []
     for batch in loader:
         batch = move_batch(batch, device)
         labels = batch["label"]
@@ -184,14 +279,27 @@ def evaluate(
         pred = torch.argmax(logits, dim=1)
         y_true.extend(labels.detach().cpu().tolist())
         y_pred.extend(pred.detach().cpu().tolist())
+        if "range_m" in batch:
+            ranges_m.extend(batch["range_m"].detach().cpu().tolist())
     metrics = classification_metrics(y_true, y_pred, len(class_names), class_names)
     metrics["loss"] = total_loss / max(total_count, 1)
+    if distance_bin_width_m > 0:
+        metrics["distance_bins"] = distance_binned_metrics(
+            y_true,
+            y_pred,
+            ranges_m,
+            len(class_names),
+            class_names,
+            distance_bin_width_m,
+        )
     return metrics
 
 
 def train(cfg: TrainConfig) -> dict:
     set_seed(cfg.seed)
     device = resolve_device(cfg.device)
+    if not np.isfinite(cfg.distance_bin_width_m) or cfg.distance_bin_width_m <= 0:
+        raise ValueError("distance_bin_width_m must be greater than 0")
     out_dir = Path(cfg.out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "train_config.json").write_text(json.dumps(asdict(cfg), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -242,6 +350,7 @@ def train(cfg: TrainConfig) -> dict:
     print(f"[Init] device={device} classes={ordered_names}", flush=True)
     print(f"[Data] train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}", flush=True)
     print(f"[Meta] dim={len(meta_feature_names)} features={meta_feature_names}", flush=True)
+    print(f"[DistanceMetrics] bin_width={cfg.distance_bin_width_m:g}m", flush=True)
 
     best_val_acc = -1.0
     history = []
@@ -297,7 +406,14 @@ def train(cfg: TrainConfig) -> dict:
                 out_dir / "best.pth",
             )
 
-    test_metrics = evaluate(model, test_loader, criterion, device, ordered_names)
+    test_metrics = evaluate(
+        model,
+        test_loader,
+        criterion,
+        device,
+        ordered_names,
+        distance_bin_width_m=cfg.distance_bin_width_m,
+    )
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -315,12 +431,23 @@ def train(cfg: TrainConfig) -> dict:
         "class_names": ordered_names,
         "label_to_id": {str(k): int(v) for k, v in label_to_id.items()},
         "meta_features": list(meta_feature_names),
+        "distance_bin_width_m": float(cfg.distance_bin_width_m),
         "best_val_accuracy": best_val_acc,
         "test": test_metrics,
         "history": history,
     }
     (out_dir / "metrics.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("[Test]", json.dumps(test_metrics, ensure_ascii=False, indent=2), flush=True)
+    print(
+        "[Test Overall] "
+        f"loss={test_metrics['loss']:.5f} "
+        f"accuracy={test_metrics['accuracy']:.4f} "
+        f"macro_precision={test_metrics['macro_precision']:.4f} "
+        f"macro_recall={test_metrics['macro_recall']:.4f} "
+        f"macro_f1={test_metrics['macro_f1']:.4f}",
+        flush=True,
+    )
+    print_distance_binned_metrics(test_metrics, "Test")
+    print(f"[Metrics] {out_dir / 'metrics.json'}", flush=True)
     print(f"[Save] {out_dir / 'best.pth'}", flush=True)
     return summary
 
@@ -344,6 +471,12 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--grad-clip", type=float, default=5.0)
     parser.add_argument("--class-weight", dest="class_weight", action="store_true", default=True)
     parser.add_argument("--no-class-weight", dest="class_weight", action="store_false")
+    parser.add_argument(
+        "--distance-bin-width-m",
+        type=float,
+        default=100.0,
+        help="range segment width in meters for final distance-binned test metrics",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument(

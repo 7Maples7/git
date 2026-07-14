@@ -639,6 +639,7 @@ class RadarSampleDataset(Dataset):
             "pc_spectrum_raw": _as_1d_float(pc_spectrum),
             "meta": _meta_features(rec, mtd_echo, pc_echo)[self.meta_indices],
             "label": label_id,
+            "range_m": float(rec.range_m),
             "sample_id": rec.sample_id,
         }
 
@@ -679,5 +680,6 @@ def collate_radar_batch(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "pc_spectrum_mask": pc_spectrum_mask,
         "meta": torch.stack([torch.as_tensor(x["meta"], dtype=torch.float32) for x in batch], dim=0),
         "label": torch.as_tensor([int(x["label"]) for x in batch], dtype=torch.long),
+        "range_m": torch.as_tensor([float(x["range_m"]) for x in batch], dtype=torch.float32),
         "sample_id": [str(x["sample_id"]) for x in batch],
     }

@@ -58,6 +58,7 @@ python -m radar_three_cls.train `
   --out-dir radar_three_cls\runs\real_data `
   --epochs 50 `
   --batch-size 32 `
+  --distance-bin-width-m 100 `
   --device auto
 ```
 
@@ -75,8 +76,10 @@ python -m radar_three_cls.train `
 
 - `best.pth`：验证集准确率最好的模型。
 - `last.pth`：最后一轮模型。
-- `metrics.json`：准确率、精确率、召回率、F1、混淆矩阵和训练历史。
+- `metrics.json`：准确率、精确率、召回率、F1、混淆矩阵、按距离段划分的测试指标和训练历史。
 - `train_config.json`：训练配置。
+
+训练结束后会按 `--distance-bin-width-m` 指定的距离段宽度输出测试集指标，例如每个 `100m` 距离段的准确率、宏平均精确率、宏平均召回率、F1 等。详细的每类指标和混淆矩阵会写入 `metrics.json` 的 `test.distance_bins.bins`。
 
 ## 推理
 
