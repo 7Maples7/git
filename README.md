@@ -91,6 +91,20 @@ python -m radar_three_cls.infer `
   --output radar_three_cls\runs\real_data\infer.json
 ```
 
+## 新增功能：C++/Qt 调用识别模型
+
+本版本新增了一套面向上位机集成的识别桥接能力，方便 C++/Qt 程序直接调用训练好的三分类模型：
+
+- `radar_three_recognizer_worker.py`：Python 常驻 worker，通过 JSON Lines 协议加载 `best.pth` 或 `last.pth`，接收 base64 编码的 `DClsEcho::data()` 二进制点迹并返回识别结果。
+- `radar_three_recognizer_worker.spec`：PyInstaller 打包配置，可将 worker 打包为独立可执行程序，便于部署到没有源码入口的运行环境。
+- `cpp/RadarThreeRecognizerBridge.h/.cpp`：Qt `QProcess` 封装，负责启动 worker、初始化模型、发送点迹、读取三分类预测结果和错误信息。
+- `cpp/example_main.cpp`：命令行示例，演示如何从文件读取 `DClsEcho` 二进制数据并调用桥接类完成识别。
+- `cpp/radar_three_cls_client.pro`：qmake 示例工程，可直接用于验证 C++ 调用链路。
+
+桥接接口返回的关键信息包括 `pred_target_type`、`pred_target_type_hex`、`pred_label`、`score`、`top1_score`、`top2_score`、`margin`、`probabilities` 和 `topk`，便于业务侧同时使用类别编号、十六进制目标类型和置信度。
+
+更多 C++ 接入方式见 `cpp/README.md`。
+
 ## 点迹可视化界面
 
 启动交互式查看器：
